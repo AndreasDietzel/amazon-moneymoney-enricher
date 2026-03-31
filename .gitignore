@@ -1,0 +1,39 @@
+# === SECURITY: Never commit credentials or secrets ===
+*.pem
+*.key
+*.p12
+*.cer
+credentials.json
+secrets.json
+*.env
+.env*
+config.local.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+.pytest_cache/
+
+# macOS
+.DS_Store
+.Spotlight-V100
+.Trashes
+._*
+
+# Cache files (local only, may contain order data)
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+Cache/
+Logs/
+*.log
+
+# CocoaPods
+Pods/
+Podfile.lock

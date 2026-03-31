@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd plist for automatic enrichment after MoneyMoney sync.
+  Install: cp com.andreasdietzel.amazon-enricher.plist ~/Library/LaunchAgents/
+           launchctl load ~/Library/LaunchAgents/com.andreasdietzel.amazon-enricher.plist
+
+  Runs every 4 hours. Adjust StartInterval (seconds) as needed.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.andreasdietzel.amazon-enricher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>-m</string>
+        <string>enricher</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/andreasdietzel/Projects/amazon-moneymoney-enricher</string>
+
+    <key>StartInterval</key>
+    <integer>14400</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andreasdietzel/Library/Application Support/AmazonEnricher/launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/andreasdietzel/Library/Application Support/AmazonEnricher/launchd-error.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
