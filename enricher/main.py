@@ -65,7 +65,7 @@ def run(dry_run: bool = False) -> None:
         for tx in pending:
             logger.info(f"Verarbeite: {tx.purpose[:60]}... | {tx.amount}€ | {tx.booking_date}")
 
-            order = find_matching_order(context, tx.booking_date, abs(tx.amount))
+            order = find_matching_order(context, tx.booking_date, abs(tx.amount), tx.end_to_end_reference)
 
             if not order:
                 logger.warning(f"  ✗ Keine passende Bestellung gefunden")

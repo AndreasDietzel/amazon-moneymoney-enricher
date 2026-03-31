@@ -1,8 +1,9 @@
 """
 Amazon session management.
-- First run: opens a real browser window via Playwright for login (handles 2FA, captcha)
-- Session cookies are stored encrypted in macOS Keychain
-- Subsequent runs reuse the stored cookies silently
+- Uses WebKit (Safari engine) — natürlicher auf macOS, weniger Bot-Erkennung
+- Öffnet einmalig ein sichtbares Fenster für den Login (2FA, Captcha unterstützt)
+- Session-Cookies werden verschlüsselt im macOS Keychain gespeichert
+- Folge-Runs nutzen die gespeicherten Cookies ohne Browser-Öffnung
 """
 import json
 import logging
@@ -13,13 +14,14 @@ from .config import (
     AMAZON_BASE_URL,
     KEYCHAIN_SERVICE,
     KEYCHAIN_COOKIE_KEY,
-    KEYCHAIN_USERNAME_KEY,
 )
 
 logger = logging.getLogger(__name__)
 
-# Page that requires login to confirm session is valid
-_SESSION_CHECK_URL = f"{AMAZON_BASE_URL}/gp/css/order-history?opt=ab&digitalOrders=1&unifiedOrders=1&returnTo=&orderFilter=months-6"
+_ORDERS_URL = f"{AMAZON_BASE_URL}/gp/css/order-history?opt=ab&digitalOrders=1&unifiedOrders=1&returnTo=&orderFilter=months-3"
+
+# Selector that only appears when the order history page is fully loaded
+_ORDERS_LOADED_SELECTOR = ".order, [class*='order-card'], #ordersContainer, .order-date-invoice-item, .a-pagination"
 
 
 def _load_cookies() -> list[dict] | None:
@@ -28,13 +30,13 @@ def _load_cookies() -> list[dict] | None:
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
-            logger.warning("Stored cookies are malformed, will re-login")
+            logger.warning("Gespeicherte Cookies sind ungültig, erneuter Login erforderlich")
     return None
 
 
 def _save_cookies(cookies: list[dict]) -> None:
     keyring.set_password(KEYCHAIN_SERVICE, KEYCHAIN_COOKIE_KEY, json.dumps(cookies))
-    logger.debug(f"Saved {len(cookies)} cookies to Keychain")
+    logger.debug(f"{len(cookies)} Cookies im Keychain gespeichert")
 
 
 def _clear_cookies() -> None:
@@ -45,43 +47,55 @@ def _clear_cookies() -> None:
 
 
 def _is_session_valid(page: Page) -> bool:
-    """Check if we're logged in by navigating to orders page."""
-    page.goto(_SESSION_CHECK_URL, wait_until="domcontentloaded")
-    # If redirected to sign-in, session is invalid
-    return "sign-in" not in page.url and "ap/signin" not in page.url
+    """
+    Navigiert zur Bestellseite und wartet auf echten Inhalt.
+    Gibt False zurück wenn auf die Login-Seite weitergeleitet wird.
+    """
+    try:
+        page.goto(_ORDERS_URL, wait_until="domcontentloaded")
+        # Amazon redirects to sign-in via server-side or JS — wait to settle
+        page.wait_for_load_state("networkidle", timeout=10_000)
+        url = page.url
+        if "sign-in" in url or "ap/signin" in url or "ap/mfa" in url:
+            return False
+        # Also verify actual order content loaded (not a blank/loading page)
+        try:
+            page.wait_for_selector(_ORDERS_LOADED_SELECTOR, timeout=8_000)
+            return True
+        except Exception:
+            # Selector not found — page might be sign-in or empty
+            logger.debug(f"Order content selector not found on: {url}")
+            return False
+    except Exception as e:
+        logger.debug(f"Session check failed: {e}")
+        return False
 
 
 def get_authenticated_context(playwright) -> BrowserContext:
     """
-    Returns a Playwright BrowserContext with a valid Amazon session.
-    If no valid cookies exist, opens a visible browser for the user to log in.
+    Gibt einen Playwright BrowserContext mit gültiger Amazon-Session zurück.
+    Nutzt WebKit (Safari-Engine). Öffnet bei Bedarf ein Fenster zum Einloggen.
     """
-    browser = playwright.chromium.launch(headless=False)
-    context = browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        )
-    )
+    browser = playwright.webkit.launch(headless=False)
+    context = browser.new_context()
 
     cookies = _load_cookies()
     if cookies:
         context.add_cookies(cookies)
         page = context.new_page()
         if _is_session_valid(page):
-            logger.info("Reusing stored Amazon session")
+            logger.info("Gespeicherte Amazon-Session wiederhergestellt")
             page.close()
             return context
         else:
-            logger.info("Stored session expired, re-login required")
+            logger.info("Session abgelaufen, erneuter Login erforderlich")
             _clear_cookies()
             page.close()
             context.clear_cookies()
 
-    # No valid session — open browser for manual login
+    # Kein gültiger Login — Browser öffnen
     page = context.new_page()
-    page.goto(f"{AMAZON_BASE_URL}/ap/signin", wait_until="domcontentloaded")
+    page.goto(f"{AMAZON_BASE_URL}/gp/sign-in.html", wait_until="domcontentloaded")
 
     print("\n" + "="*60)
     print("Amazon-Login erforderlich.")
@@ -89,26 +103,43 @@ def get_authenticated_context(playwright) -> BrowserContext:
     print("Das Fenster schließt sich automatisch nach erfolgreichem Login.")
     print("="*60 + "\n")
 
-    # Wait until the user reaches the orders or home page (login complete)
-    page.wait_for_url(
-        lambda url: "order-history" in url or "/gp/css" in url or url == f"{AMAZON_BASE_URL}/",
-        timeout=300_000  # 5 minutes
+    # Wait until no longer on any sign-in / auth page
+    page.wait_for_function(
+        """() => {
+            const url = window.location.href;
+            return !url.includes('/ap/signin') &&
+                   !url.includes('/ap/mfa') &&
+                   !url.includes('/ap/cvf') &&
+                   !url.includes('sign-in') &&
+                   !url.includes('ap/ape') &&
+                   document.readyState === 'complete';
+        }""",
+        timeout=300_000,  # 5 minutes
     )
 
-    # Persist cookies
+    # Give Amazon time to set all session cookies
+    page.wait_for_load_state("networkidle", timeout=10_000)
+
     all_cookies = context.cookies()
     _save_cookies(all_cookies)
-    logger.info("Login successful, session cookies saved to Keychain")
+    logger.info(f"Login erfolgreich, {len(all_cookies)} Cookies im Keychain gespeichert")
     page.close()
 
     return context
 
 
 def fetch_page(context: BrowserContext, url: str) -> str:
-    """Fetch a URL with the authenticated context, return page HTML."""
+    """
+    Lädt eine URL im authentifizierten Kontext und gibt den HTML-Inhalt zurück.
+    Wartet auf networkidle damit JavaScript-gerenderte Inhalte vollständig geladen sind.
+    """
     page = context.new_page()
     try:
         page.goto(url, wait_until="domcontentloaded")
+        page.wait_for_load_state("networkidle", timeout=15_000)
+        return page.content()
+    except Exception as e:
+        logger.warning(f"Timeout beim Laden von {url}: {e} — nehme verfügbaren Inhalt")
         return page.content()
     finally:
         page.close()

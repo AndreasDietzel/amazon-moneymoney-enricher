@@ -26,13 +26,19 @@ def init_db() -> None:
     with _connect() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS orders (
-                order_id     TEXT PRIMARY KEY,
-                order_date   TEXT NOT NULL,
-                amount       REAL NOT NULL,
-                items        TEXT NOT NULL,  -- JSON list of item titles
-                fetched_at   TEXT NOT NULL
+                order_id          TEXT PRIMARY KEY,
+                order_date        TEXT NOT NULL,
+                amount            REAL NOT NULL,
+                items             TEXT NOT NULL,
+                end_to_end_ref    TEXT,
+                fetched_at        TEXT NOT NULL
             )
         """)
+        # Migrate: add end_to_end_ref column if upgrading from older schema
+        try:
+            conn.execute("ALTER TABLE orders ADD COLUMN end_to_end_ref TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         conn.execute("""
             CREATE TABLE IF NOT EXISTS enriched_transactions (
                 transaction_id  TEXT PRIMARY KEY,
@@ -41,6 +47,7 @@ def init_db() -> None:
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_date ON orders(order_date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_orders_ref ON orders(end_to_end_ref)")
 
 
 def get_order_by_date_amount(order_date: date, amount: float, tolerance: float = 0.01) -> Optional[dict]:
@@ -56,12 +63,26 @@ def get_order_by_date_amount(order_date: date, amount: float, tolerance: float =
     return None
 
 
-def save_order(order_id: str, order_date: date, amount: float, items: list[str]) -> None:
+def get_order_by_reference(end_to_end_ref: str) -> Optional[dict]:
+    """Find a cached order by its SEPA end-to-end reference."""
+    if not end_to_end_ref:
+        return None
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM orders WHERE end_to_end_ref = ?",
+            (end_to_end_ref,)
+        ).fetchone()
+        if row:
+            return {**row, "items": json.loads(row["items"])}
+    return None
+
+
+def save_order(order_id: str, order_date: date, amount: float, items: list[str], end_to_end_ref: str = "") -> None:
     with _connect() as conn:
         conn.execute("""
-            INSERT OR REPLACE INTO orders (order_id, order_date, amount, items, fetched_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (order_id, order_date.isoformat(), amount, json.dumps(items), datetime.now().isoformat()))
+            INSERT OR REPLACE INTO orders (order_id, order_date, amount, items, end_to_end_ref, fetched_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (order_id, order_date.isoformat(), amount, json.dumps(items), end_to_end_ref or None, datetime.now().isoformat()))
     logger.debug(f"Cached order {order_id}: {items}")
 
 
