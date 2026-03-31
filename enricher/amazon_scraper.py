@@ -145,30 +145,43 @@ def find_matching_order(
     booking_date: date,
     amount: float,
     end_to_end_ref: str = "",
+    amazon_order_id: str = "",
 ) -> Optional[AmazonOrder]:
     """
     Find an Amazon order for a MoneyMoney transaction.
 
-    Strategy 1 (if ref available): search Amazon order history by SEPA reference.
-    Strategy 2 (fallback): match by booking date ±ORDER_LOOKUP_DAYS and amount ±0.02€.
-    Both strategies check the local cache before hitting Amazon.
+    Strategy 1: direct order detail page by order ID extracted from purpose field
+               (handles split shipments charged as separate transactions)
+    Strategy 2: cache lookup by reference or date+amount
+    Strategy 3: fetch all pages from Amazon, match by date ±ORDER_LOOKUP_DAYS + amount ±0.02€
     """
-    # --- Strategy 1: cache lookup by reference (instant, no Amazon request) ---
+    # --- Strategy 1: direct lookup by Amazon order ID from purpose field ---
+    if amazon_order_id:
+        cached = cache.get_order_by_id(amazon_order_id)
+        if cached:
+            logger.debug(f"Cache hit by order ID {amazon_order_id}")
+            return AmazonOrder(**_row_to_kwargs(cached))
+        order = _fetch_order_by_id(context, amazon_order_id)
+        if order:
+            cache.save_order(order.order_id, order.order_date, order.amount, order.items, end_to_end_ref)
+            logger.info(f"Order ID match → {order.order_id}: {order.items}")
+            return order
+
+    # --- Strategy 2: cache lookup by reference or date+amount ---
     if end_to_end_ref:
         cached = cache.get_order_by_reference(end_to_end_ref)
         if cached:
             logger.debug(f"Cache hit by reference {end_to_end_ref}")
             return AmazonOrder(**_row_to_kwargs(cached))
 
-    # --- Strategy 2: cache lookup by date + amount ---
     for delta in range(-ORDER_LOOKUP_DAYS, ORDER_LOOKUP_DAYS + 1):
         candidate_date = booking_date + timedelta(days=delta)
         cached = cache.get_order_by_date_amount(candidate_date, amount)
         if cached:
-            logger.debug(f"Cache hit by date+amount for {amount}€ on {candidate_date}")
+            logger.debug(f"Cache hit by date+amount: {amount}€ on {candidate_date}")
             return AmazonOrder(**_row_to_kwargs(cached))
 
-    # --- Strategy 3: fetch all pages from Amazon, match by date + amount ---
+    # --- Strategy 3: fetch all pages, match by date + amount ---
     logger.info(f"Fetching Amazon orders to match {amount}€ around {booking_date}")
     orders = _fetch_all_orders(context)
 
@@ -180,7 +193,6 @@ def find_matching_order(
             matched = order
             break
 
-    # Cache all fetched orders; attach reference to matched one
     for order in orders:
         ref = end_to_end_ref if (matched and order.order_id == matched.order_id) else ""
         cache.save_order(order.order_id, order.order_date, order.amount, order.items, ref)
@@ -189,7 +201,38 @@ def find_matching_order(
         logger.info(f"Date+amount match → order {matched.order_id}: {matched.items}")
         return matched
 
-    logger.warning(f"No Amazon order found for {amount}€ around {booking_date} (ref={end_to_end_ref!r})")
+    logger.warning(f"No Amazon order found for {amount}€ around {booking_date} (order_id={amazon_order_id!r})")
+    return None
+
+
+def find_refund_origin(context: BrowserContext, amount: float, booking_date: date) -> Optional[AmazonOrder]:
+    """
+    For a refund transaction (positive amount), find the original order.
+    Looks in cache for an order with the same absolute amount, then falls back to Amazon.
+    """
+    abs_amount = abs(amount)
+
+    # Search cache across a wider window (refunds can come weeks after order)
+    with cache._connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM orders WHERE ABS(amount - ?) < 0.02 ORDER BY ABS(julianday(order_date) - julianday(?)) LIMIT 1",
+            (abs_amount, booking_date.isoformat())
+        ).fetchone()
+        if row:
+            import json
+            return AmazonOrder(
+                order_id=row["order_id"],
+                order_date=date.fromisoformat(row["order_date"]),
+                amount=row["amount"],
+                items=json.loads(row["items"]),
+            )
+
+    # Not in cache — fetch order history and search
+    orders = _fetch_all_orders(context)
+    for order in orders:
+        cache.save_order(order.order_id, order.order_date, order.amount, order.items)
+        if abs(order.amount - abs_amount) < 0.02:
+            return order
     return None
 
 
@@ -228,6 +271,73 @@ def _fetch_all_orders(context: BrowserContext) -> list[AmazonOrder]:
         url = AMAZON_BASE_URL + next_href if next_href.startswith("/") else next_href
 
     return all_orders
+
+
+def _fetch_order_by_id(context: BrowserContext, order_id: str) -> Optional[AmazonOrder]:
+    """
+    Fetch a single order's detail page and parse items from it.
+    URL: https://www.amazon.de/gp/your-account/order-details?orderID=XXX-XXXXXXX-XXXXXXX
+    """
+    from .amazon_session import fetch_page
+    from .config import AMAZON_BASE_URL
+
+    url = f"{AMAZON_BASE_URL}/gp/your-account/order-details?orderID={order_id}"
+    html = fetch_page(context, url)
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Parse order date
+    order_date = None
+    for span in soup.select("span.a-size-base.a-color-secondary"):
+        d = _parse_date(span.get_text())
+        if d:
+            order_date = d
+            break
+
+    # Parse total amount — last "Gesamtbetrag" or grand total row
+    amount = None
+    for row in soup.select(".a-row"):
+        text = row.get_text(" ", strip=True)
+        if "Gesamtbetrag" in text or "Grand Total" in text or "Bestellsumme" in text:
+            a = _parse_amount(text)
+            if a is not None:
+                amount = a
+                break
+    # Fallback: any price on the page
+    if amount is None:
+        for span in soup.select("span.a-color-price, .grand-total-price"):
+            a = _parse_amount(span.get_text())
+            if a is not None:
+                amount = a
+                break
+
+    # Parse product titles
+    items = []
+    seen: set[str] = set()
+    for a_tag in soup.select("a[href*='/dp/']"):
+        title = a_tag.get_text(strip=True)
+        if title and len(title) > 5 and title not in seen:
+            items.append(title)
+            seen.add(title)
+    if not items:
+        for img in soup.select("img[alt]"):
+            alt = img.get("alt", "").strip()
+            if alt and len(alt) > 5 and alt not in seen:
+                items.append(alt)
+                seen.add(alt)
+    if not items:
+        items = ["Artikel unbekannt"]
+
+    if not order_date or amount is None:
+        logger.warning(f"Could not parse date/amount from order detail page for {order_id}")
+        # Still return with what we have if we have items
+        if not order_date:
+            from datetime import date as _date
+            order_date = _date.today()
+        if amount is None:
+            amount = 0.0
+
+    logger.info(f"Fetched order detail {order_id}: {items}")
+    return AmazonOrder(order_id=order_id, order_date=order_date, amount=amount, items=items)
 
 
 def _fetch_page(context: BrowserContext, url: str) -> str:

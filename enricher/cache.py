@@ -77,6 +77,20 @@ def get_order_by_reference(end_to_end_ref: str) -> Optional[dict]:
     return None
 
 
+def get_order_by_id(order_id: str) -> Optional[dict]:
+    """Find a cached order by its Amazon order ID."""
+    if not order_id:
+        return None
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM orders WHERE order_id = ?",
+            (order_id,)
+        ).fetchone()
+        if row:
+            return {**row, "items": json.loads(row["items"])}
+    return None
+
+
 def save_order(order_id: str, order_date: date, amount: float, items: list[str], end_to_end_ref: str = "") -> None:
     with _connect() as conn:
         conn.execute("""

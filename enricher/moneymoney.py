@@ -10,13 +10,14 @@ Transaction plist fields: id, name, purpose, amount, bookingDate, bookingText,
   booked, checkmark, category, categoryId, categoryUuid, valueDate
 """
 import plistlib
+import re
 import subprocess
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from .config import AMAZON_TRANSACTION_PATTERNS, ENRICHER_COMMENT_PREFIX
+from .config import AMAZON_TRANSACTION_PATTERNS, ENRICHER_COMMENT_PREFIX, ENRICHER_REFUND_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,23 @@ class MMTransaction:
     comment: str
     end_to_end_reference: str  # Amazon payment reference, e.g. "3WX110GYHY8M9F36"
     account_uuid: str
+
+    @property
+    def is_refund(self) -> bool:
+        """Positive Amazon amount = Erstattung (refund/credit)."""
+        return self.amount > 0
+
+    @property
+    def amazon_order_id(self) -> str:
+        """
+        Extract Amazon order ID from the purpose field.
+        Purpose format: "305.9901323.8516315 Amzn Mktp DE ..."
+        Amazon order IDs use dashes: "305-9901323-8516315"
+        """
+        match = re.search(r"\b(\d{3})\.(\d{7})\.(\d{7})\b", self.purpose)
+        if match:
+            return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+        return ""
 
 
 def _run_applescript(script: str) -> str:
@@ -88,10 +106,10 @@ def _is_amazon(tx: MMTransaction) -> bool:
 
 
 def is_already_enriched(tx: MMTransaction) -> bool:
-    return tx.comment.startswith(ENRICHER_COMMENT_PREFIX)
+    return tx.comment.startswith(ENRICHER_COMMENT_PREFIX) or tx.comment.startswith(ENRICHER_REFUND_PREFIX)
 
 
-def set_transaction_comment(tx: MMTransaction, comment_text: str) -> bool:
+def set_transaction_comment(tx: MMTransaction, comment_text: str, is_refund: bool = False) -> bool:
     """
     Write enriched item list into the MoneyMoney transaction comment field.
     Uses 'set transaction id X comment to "..."' AppleScript command.
@@ -100,7 +118,8 @@ def set_transaction_comment(tx: MMTransaction, comment_text: str) -> bool:
         logger.debug(f"Transaction {tx.id} already enriched, skipping")
         return False
 
-    full_comment = f"{ENRICHER_COMMENT_PREFIX}{comment_text}"
+    prefix = ENRICHER_REFUND_PREFIX if is_refund else ENRICHER_COMMENT_PREFIX
+    full_comment = f"{prefix}{comment_text}"
     # Escape double quotes for AppleScript
     safe_comment = full_comment.replace('"', '\\"')
 

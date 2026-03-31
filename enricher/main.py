@@ -14,7 +14,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 from . import cache
-from .amazon_scraper import find_matching_order, format_description
+from .amazon_scraper import find_matching_order, find_refund_origin, format_description
 from .amazon_session import get_authenticated_context, _clear_cookies
 from .config import LOG_FILE, APP_DIR
 from .moneymoney import get_amazon_transactions, is_already_enriched, set_transaction_comment
@@ -65,7 +65,18 @@ def run(dry_run: bool = False) -> None:
         for tx in pending:
             logger.info(f"Verarbeite: {tx.purpose[:60]}... | {tx.amount}€ | {tx.booking_date}")
 
-            order = find_matching_order(context, tx.booking_date, abs(tx.amount), tx.end_to_end_reference)
+            if tx.is_refund:
+                order = find_refund_origin(context, tx.amount, tx.booking_date)
+                is_refund = True
+            else:
+                order = find_matching_order(
+                    context,
+                    tx.booking_date,
+                    abs(tx.amount),
+                    end_to_end_ref=tx.end_to_end_reference,
+                    amazon_order_id=tx.amazon_order_id,
+                )
+                is_refund = False
 
             if not order:
                 logger.warning(f"  ✗ Keine passende Bestellung gefunden")
@@ -73,12 +84,13 @@ def run(dry_run: bool = False) -> None:
                 continue
 
             description = format_description(order)
-            logger.info(f"  ✓ {description}")
+            logger.info(f"  ✓ {'[Erstattung] ' if is_refund else ''}{description}")
 
             if dry_run:
-                print(f"[DRY RUN] Würde setzen: {description}")
+                prefix = "[ERSTATTUNG] " if is_refund else ""
+                print(f"[DRY RUN] {prefix}{description}")
             else:
-                success = set_transaction_comment(tx, description)
+                success = set_transaction_comment(tx, description, is_refund=is_refund)
                 if success:
                     cache.mark_enriched(str(tx.id), order.order_id)
                     enriched_count += 1

@@ -18,14 +18,16 @@ KEYCHAIN_USERNAME_KEY = "amazon_username"
 AMAZON_BASE_URL = "https://www.amazon.de"
 AMAZON_ORDERS_URL = f"{AMAZON_BASE_URL}/gp/css/order-history"
 
-# How many days back to search for matching orders
-ORDER_LOOKUP_DAYS = 3
+# How many days back to search for matching orders.
+# Amazon charges 1-6 days after the order date (when item ships).
+ORDER_LOOKUP_DAYS = 7
 
 # Maximum number of items to show in MoneyMoney description
 MAX_ITEMS_IN_DESCRIPTION = 4
 
-# Prefix for enriched comments to identify them later
+# Prefixes for enriched comments
 ENRICHER_COMMENT_PREFIX = "🛒 "
+ENRICHER_REFUND_PREFIX  = "↩ Erstattung: "
 
 # Pattern to detect Amazon transactions in MoneyMoney
 AMAZON_TRANSACTION_PATTERNS = [
