@@ -17,7 +17,7 @@ from . import cache
 from .amazon_scraper import find_matching_order, format_description
 from .amazon_session import get_authenticated_context, _clear_cookies
 from .config import LOG_FILE, APP_DIR
-from .moneymoney import get_amazon_transactions, filter_amazon, set_transaction_comment
+from .moneymoney import get_amazon_transactions, is_already_enriched, set_transaction_comment
 
 # Logging setup
 APP_DIR.mkdir(parents=True, exist_ok=True)
@@ -37,18 +37,17 @@ def run(dry_run: bool = False) -> None:
     cache.init_db()
 
     # 1. Fetch Amazon transactions from MoneyMoney
-    all_transactions = get_amazon_transactions(days_back=60)
-    amazon_transactions = filter_amazon(all_transactions)
+    amazon_transactions = get_amazon_transactions(days_back=60)
     logger.info(f"Gefundene Amazon-Transaktionen: {len(amazon_transactions)}")
 
     if not amazon_transactions:
         logger.info("Keine Amazon-Transaktionen zum Anreichern.")
         return
 
-    # Filter already enriched
+    # Filter already enriched (check comment field AND local cache)
     pending = [
         t for t in amazon_transactions
-        if not cache.is_already_enriched(t.transaction_id)
+        if not is_already_enriched(t) and not cache.is_already_enriched(str(t.id))
     ]
     logger.info(f"Noch nicht angereichert: {len(pending)}")
 
@@ -81,7 +80,7 @@ def run(dry_run: bool = False) -> None:
             else:
                 success = set_transaction_comment(tx, description)
                 if success:
-                    cache.mark_enriched(tx.transaction_id, order.order_id)
+                    cache.mark_enriched(str(tx.id), order.order_id)
                     enriched_count += 1
                 else:
                     failed_count += 1

@@ -1,19 +1,19 @@
 """
 MoneyMoney AppleScript bridge.
-Reads Amazon transactions and writes enriched comments back.
 
-MoneyMoney's writable field per transaction is `comment` (Notiz).
-The bank-provided `purpose` field is read-only.
+Tested against MoneyMoney's actual SDEF dictionary. Available commands:
+  export transactions from date "YYYY-MM-DD" [to date "YYYY-MM-DD"] as "plist"
+  set transaction id <int> comment to "<text>"
 
-AppleScript dictionary reference:
-  transaction properties: name, purpose, amount, bookingDate, comment,
-                          bankCode, accountNumber, category, currency
+Transaction plist fields: id, name, purpose, amount, bookingDate, bookingText,
+  currency, comment (if set), endToEndReference (if present), accountUuid,
+  booked, checkmark, category, categoryId, categoryUuid, valueDate
 """
+import plistlib
 import subprocess
-import json
 import logging
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from .config import AMAZON_TRANSACTION_PATTERNS, ENRICHER_COMMENT_PREFIX
@@ -23,13 +23,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class MMTransaction:
-    transaction_id: str   # synthetic: accountNumber + bookingDate + amount
+    id: int
     name: str
     purpose: str
     amount: float
     booking_date: date
-    account_number: str
     comment: str
+    end_to_end_reference: str  # Amazon payment reference, e.g. "3WX110GYHY8M9F36"
+    account_uuid: str
 
 
 def _run_applescript(script: str) -> str:
@@ -43,55 +44,42 @@ def _run_applescript(script: str) -> str:
     return result.stdout.strip()
 
 
-def _run_applescript_file(path: str) -> str:
-    result = subprocess.run(
-        ["osascript", path],
-        capture_output=True,
-        text=True
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"AppleScript error: {result.stderr.strip()}")
-    return result.stdout.strip()
-
-
 def get_amazon_transactions(days_back: int = 60) -> list[MMTransaction]:
     """
-    Fetch recent transactions from all MoneyMoney accounts
-    that match Amazon payment patterns.
+    Export recent transactions from MoneyMoney as plist and filter for Amazon.
+    Uses the documented 'export transactions' AppleScript command.
     """
-    script = f"""
-    tell application "MoneyMoney"
-        set txList to {{}}
-        set allAccounts to every account
-        repeat with acc in allAccounts
-            set txns to transactions of acc where booking date >= (current date) - {days_back} * days
-            repeat with t in txns
-                set txList to txList & {{{{name:(name of t), purpose:(purpose of t), amount:(amount of t), bookingDate:(booking date of t as string), comment:(comment of t), accountNumber:(account number of acc)}}}}
-            end repeat
-        end repeat
-        return txList
-    end tell
-    """
-    # NOTE: MoneyMoney's AppleScript API for transaction iteration varies by version.
-    # This implementation uses the documented properties. Adjust if needed.
+    from_date = (date.today() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+    to_date = date.today().strftime("%Y-%m-%d")
+
+    script = f'tell application "MoneyMoney" to export transactions from date "{from_date}" to date "{to_date}" as "plist"'
     try:
         raw = _run_applescript(script)
-        return _parse_transactions(raw)
     except RuntimeError as e:
-        logger.error(f"Failed to fetch MoneyMoney transactions: {e}")
-        logger.info("Falling back to CSV export approach - see docs/applescript-troubleshooting.md")
+        logger.error(f"Failed to export MoneyMoney transactions: {e}")
         return []
 
+    data = plistlib.loads(raw.encode("utf-8"))
+    all_transactions = data.get("transactions", [])
+    logger.info(f"Exported {len(all_transactions)} transactions from MoneyMoney")
 
-def _parse_transactions(raw: str) -> list[MMTransaction]:
-    """Parse AppleScript record list output into MMTransaction objects."""
-    transactions = []
-    # AppleScript returns records as comma-separated key:value pairs
-    # Each record is wrapped in {} — parse conservatively
-    # Real parsing depends on actual AppleScript output format
-    # This is a stub that will be refined once we test against live MoneyMoney
-    logger.debug(f"Raw AppleScript output length: {len(raw)}")
-    return transactions
+    result = []
+    for t in all_transactions:
+        tx = MMTransaction(
+            id=t["id"],
+            name=t.get("name", ""),
+            purpose=t.get("purpose", ""),
+            amount=t.get("amount", 0.0),
+            booking_date=t["bookingDate"].date() if isinstance(t["bookingDate"], datetime) else t["bookingDate"],
+            comment=t.get("comment", ""),
+            end_to_end_reference=t.get("endToEndReference", ""),
+            account_uuid=t.get("accountUuid", ""),
+        )
+        result.append(tx)
+
+    amazon = [t for t in result if _is_amazon(t)]
+    logger.info(f"Amazon transactions: {len(amazon)}")
+    return amazon
 
 
 def _is_amazon(tx: MMTransaction) -> bool:
@@ -99,46 +87,28 @@ def _is_amazon(tx: MMTransaction) -> bool:
     return any(p.upper() in text for p in AMAZON_TRANSACTION_PATTERNS)
 
 
-def filter_amazon(transactions: list[MMTransaction]) -> list[MMTransaction]:
-    return [t for t in transactions if _is_amazon(t)]
+def is_already_enriched(tx: MMTransaction) -> bool:
+    return tx.comment.startswith(ENRICHER_COMMENT_PREFIX)
 
 
-def set_transaction_comment(transaction: MMTransaction, comment_text: str) -> bool:
+def set_transaction_comment(tx: MMTransaction, comment_text: str) -> bool:
     """
-    Write enriched item list into the MoneyMoney transaction comment (Notiz) field.
-    Only updates if the comment isn't already enriched by us.
+    Write enriched item list into the MoneyMoney transaction comment field.
+    Uses 'set transaction id X comment to "..."' AppleScript command.
     """
-    if transaction.comment.startswith(ENRICHER_COMMENT_PREFIX):
-        logger.debug(f"Transaction {transaction.transaction_id} already enriched, skipping")
+    if is_already_enriched(tx):
+        logger.debug(f"Transaction {tx.id} already enriched, skipping")
         return False
 
     full_comment = f"{ENRICHER_COMMENT_PREFIX}{comment_text}"
+    # Escape double quotes for AppleScript
+    safe_comment = full_comment.replace('"', '\\"')
 
-    script = f"""
-    tell application "MoneyMoney"
-        set allAccounts to every account
-        repeat with acc in allAccounts
-            if account number of acc is "{transaction.account_number}" then
-                set txns to transactions of acc where booking date is date "{transaction.booking_date.strftime('%d.%m.%Y')}"
-                repeat with t in txns
-                    if amount of t is {transaction.amount} then
-                        set comment of t to "{full_comment}"
-                        return "ok"
-                    end if
-                end repeat
-            end if
-        end repeat
-        return "not_found"
-    end tell
-    """
+    script = f'tell application "MoneyMoney" to set transaction id {tx.id} comment to "{safe_comment}"'
     try:
-        result = _run_applescript(script)
-        if result == "ok":
-            logger.info(f"Updated comment for transaction {transaction.transaction_id}")
-            return True
-        else:
-            logger.warning(f"Transaction not found in MoneyMoney: {transaction.transaction_id}")
-            return False
+        _run_applescript(script)
+        logger.info(f"Set comment on transaction {tx.id}: {full_comment}")
+        return True
     except RuntimeError as e:
-        logger.error(f"Failed to set comment: {e}")
+        logger.error(f"Failed to set comment on transaction {tx.id}: {e}")
         return False
