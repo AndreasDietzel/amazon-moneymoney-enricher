@@ -17,7 +17,12 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-from .config import AMAZON_TRANSACTION_PATTERNS, ENRICHER_COMMENT_PREFIX, ENRICHER_REFUND_PREFIX
+from .config import (
+    AMAZON_TRANSACTION_PATTERNS,
+    ENRICHER_COMMENT_PREFIX,
+    ENRICHER_REFUND_PREFIX,
+    FUTURE_BOOKING_LOOKAHEAD_DAYS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +73,7 @@ def get_amazon_transactions(days_back: int = 60) -> list[MMTransaction]:
     Uses the documented 'export transactions' AppleScript command.
     """
     from_date = (date.today() - timedelta(days=days_back)).strftime("%Y-%m-%d")
-    to_date = date.today().strftime("%Y-%m-%d")
+    to_date = (date.today() + timedelta(days=FUTURE_BOOKING_LOOKAHEAD_DAYS)).strftime("%Y-%m-%d")
 
     script = f'tell application "MoneyMoney" to export transactions from date "{from_date}" to date "{to_date}" as "plist"'
     try:

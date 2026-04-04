@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd plist for automatic enrichment after MoneyMoney sync.
+
+  1. Replace YOUR_USERNAME with your macOS username (whoami)
+  2. Replace /path/to/amazon-moneymoney-enricher with the actual project path
+  3. Replace /usr/bin/python3 with your project Python (for example .venv/bin/python)
+  3. Copy and load:
+       cp com.example.amazon-enricher.plist ~/Library/LaunchAgents/
+       launchctl load ~/Library/LaunchAgents/com.example.amazon-enricher.plist
+
+  Runs every 4 hours. Adjust StartInterval (seconds) as needed.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.amazon-enricher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/path/to/amazon-moneymoney-enricher/.venv/bin/python</string>
+        <string>-m</string>
+        <string>enricher</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/path/to/amazon-moneymoney-enricher</string>
+
+    <key>StartInterval</key>
+    <integer>14400</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Application Support/AmazonEnricher/launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/Library/Application Support/AmazonEnricher/launchd-error.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

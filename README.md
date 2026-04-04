@@ -60,9 +60,11 @@ playwright install chromium
 # 2. First run — browser window opens for Amazon login
 python -m enricher
 
-# 3. Install as background service (runs every 4 hours)
-cp com.andreasdietzel.amazon-enricher.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.andreasdietzel.amazon-enricher.plist
+# 3. Install as background service (runs every 4 hours and at login)
+#    Edit com.example.amazon-enricher.plist first — replace YOUR_USERNAME,
+#    project path and Python path (for example .venv/bin/python)
+cp com.example.amazon-enricher.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.example.amazon-enricher.plist
 ```
 
 ## Usage

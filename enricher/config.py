@@ -22,6 +22,11 @@ AMAZON_ORDERS_URL = f"{AMAZON_BASE_URL}/gp/css/order-history"
 # Amazon charges 1-6 days after the order date (when item ships).
 ORDER_LOOKUP_DAYS = 7
 
+# How many days ahead to include from MoneyMoney exports.
+# This catches Amazon card transactions that already appear in MoneyMoney's
+# uncategorized view before their final booking date.
+FUTURE_BOOKING_LOOKAHEAD_DAYS = 7
+
 # Maximum number of items to show in MoneyMoney description
 MAX_ITEMS_IN_DESCRIPTION = 4
 
