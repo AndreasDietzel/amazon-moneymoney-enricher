@@ -2,8 +2,6 @@
 Configuration for Amazon MoneyMoney Enricher.
 All sensitive values (credentials) are stored in macOS Keychain - never here.
 """
-import os
-from dataclasses import dataclass, field
 from pathlib import Path
 
 APP_DIR = Path.home() / "Library" / "Application Support" / "AmazonEnricher"
@@ -12,7 +10,9 @@ LOG_FILE = APP_DIR / "enricher.log"
 
 KEYCHAIN_SERVICE = "AmazonMoneyMoneyEnricher"
 KEYCHAIN_COOKIE_KEY = "amazon_session_cookies"
+KEYCHAIN_STATE_KEY = "amazon_storage_state"
 KEYCHAIN_USERNAME_KEY = "amazon_username"
+KEYCHAIN_PASSWORD_KEY = "amazon_password"
 
 # Amazon marketplace to use
 AMAZON_BASE_URL = "https://www.amazon.de"
@@ -33,6 +33,14 @@ MAX_ITEMS_IN_DESCRIPTION = 4
 # Prefixes for enriched comments
 ENRICHER_COMMENT_PREFIX = "🛒 "
 ENRICHER_REFUND_PREFIX  = "↩ Erstattung: "
+
+# Only enrich Amazon transactions that are still uncategorized in MoneyMoney.
+# This keeps the job focused on unresolved entries.
+ONLY_ENRICH_UNCATEGORIZED = True
+
+# Retry settings for temporary MoneyMoney lock errors.
+MONEYMONEY_LOCK_RETRY_ATTEMPTS = 3
+MONEYMONEY_LOCK_RETRY_BACKOFF_SECONDS = [30, 90, 180]
 
 # Pattern to detect Amazon transactions in MoneyMoney
 AMAZON_TRANSACTION_PATTERNS = [

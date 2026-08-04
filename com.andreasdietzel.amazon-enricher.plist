@@ -15,19 +15,45 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+      <string>/Users/andreasdietzel/Projects/amazon-moneymoney-enricher/.venv/bin/python</string>
         <string>-m</string>
         <string>enricher</string>
+        <string>--non-interactive</string>
     </array>
 
     <key>WorkingDirectory</key>
     <string>/Users/andreasdietzel/Projects/amazon-moneymoney-enricher</string>
 
-    <key>StartInterval</key>
-    <integer>14400</integer>
+    <key>StartCalendarInterval</key>
+    <array>
+      <dict>
+        <key>Hour</key>
+        <integer>6</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+      </dict>
+      <dict>
+        <key>Hour</key>
+        <integer>12</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+      </dict>
+      <dict>
+        <key>Hour</key>
+        <integer>18</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+      </dict>
+      <dict>
+        <key>Hour</key>
+        <integer>23</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+      </dict>
+    </array>
 
     <key>RunAtLoad</key>
-    <false/>
+    <true/>
 
     <key>StandardOutPath</key>
     <string>/Users/andreasdietzel/Library/Application Support/AmazonEnricher/launchd.log</string>

@@ -11,7 +11,7 @@
        cp com.example.amazon-enricher.plist ~/Library/LaunchAgents/
        launchctl load ~/Library/LaunchAgents/com.example.amazon-enricher.plist
 
-  Runs every 4 hours. Adjust StartInterval (seconds) as needed.
+  Runs 4 times/day. Adjust StartCalendarInterval times as needed.
 -->
 <plist version="1.0">
 <dict>
@@ -23,13 +23,39 @@
       <string>/path/to/amazon-moneymoney-enricher/.venv/bin/python</string>
         <string>-m</string>
         <string>enricher</string>
+        <string>--non-interactive</string>
     </array>
 
     <key>WorkingDirectory</key>
     <string>/path/to/amazon-moneymoney-enricher</string>
 
-    <key>StartInterval</key>
-    <integer>14400</integer>
+    <key>StartCalendarInterval</key>
+    <array>
+      <dict>
+        <key>Hour</key>
+        <integer>6</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+      </dict>
+      <dict>
+        <key>Hour</key>
+        <integer>12</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+      </dict>
+      <dict>
+        <key>Hour</key>
+        <integer>18</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+      </dict>
+      <dict>
+        <key>Hour</key>
+        <integer>23</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+      </dict>
+    </array>
 
     <key>RunAtLoad</key>
     <true/>

@@ -13,6 +13,7 @@ import plistlib
 import re
 import subprocess
 import logging
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -22,6 +23,9 @@ from .config import (
     ENRICHER_COMMENT_PREFIX,
     ENRICHER_REFUND_PREFIX,
     FUTURE_BOOKING_LOOKAHEAD_DAYS,
+    ONLY_ENRICH_UNCATEGORIZED,
+    MONEYMONEY_LOCK_RETRY_ATTEMPTS,
+    MONEYMONEY_LOCK_RETRY_BACKOFF_SECONDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,6 +41,9 @@ class MMTransaction:
     comment: str
     end_to_end_reference: str  # Amazon payment reference, e.g. "3WX110GYHY8M9F36"
     account_uuid: str
+    category: str
+    category_id: Optional[int]
+    category_uuid: str
 
     @property
     def is_refund(self) -> bool:
@@ -47,10 +54,11 @@ class MMTransaction:
     def amazon_order_id(self) -> str:
         """
         Extract Amazon order ID from the purpose field.
-        Purpose format: "305.9901323.8516315 Amzn Mktp DE ..."
+        Purpose format: "305-9901323-8516315 Amzn Mktp DE ..." (dashes)
+                     or "305.9901323.8516315 Amzn Mktp DE ..." (dots, some banks)
         Amazon order IDs use dashes: "305-9901323-8516315"
         """
-        match = re.search(r"\b(\d{3})\.(\d{7})\.(\d{7})\b", self.purpose)
+        match = re.search(r"\b(\d{3})[-.](\d{7})[-.](\d{7})\b", self.purpose)
         if match:
             return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
         return ""
@@ -67,6 +75,35 @@ def _run_applescript(script: str) -> str:
     return result.stdout.strip()
 
 
+def _is_locked_database_error(error: RuntimeError) -> bool:
+    msg = str(error).lower()
+    return "locked database" in msg or "-2720" in msg
+
+
+def _run_applescript_with_retry(script: str) -> str:
+    for attempt in range(1, MONEYMONEY_LOCK_RETRY_ATTEMPTS + 1):
+        try:
+            return _run_applescript(script)
+        except RuntimeError as error:
+            if not _is_locked_database_error(error) or attempt >= MONEYMONEY_LOCK_RETRY_ATTEMPTS:
+                raise
+
+            if attempt - 1 < len(MONEYMONEY_LOCK_RETRY_BACKOFF_SECONDS):
+                wait_seconds = MONEYMONEY_LOCK_RETRY_BACKOFF_SECONDS[attempt - 1]
+            else:
+                wait_seconds = MONEYMONEY_LOCK_RETRY_BACKOFF_SECONDS[-1]
+
+            logger.warning(
+                "MoneyMoney DB ist gesperrt (Versuch %s/%s). Neuer Versuch in %ss.",
+                attempt,
+                MONEYMONEY_LOCK_RETRY_ATTEMPTS,
+                wait_seconds,
+            )
+            time.sleep(wait_seconds)
+
+    raise RuntimeError("AppleScript retry logic reached an impossible state")
+
+
 def get_amazon_transactions(days_back: int = 60) -> list[MMTransaction]:
     """
     Export recent transactions from MoneyMoney as plist and filter for Amazon.
@@ -77,7 +114,7 @@ def get_amazon_transactions(days_back: int = 60) -> list[MMTransaction]:
 
     script = f'tell application "MoneyMoney" to export transactions from date "{from_date}" to date "{to_date}" as "plist"'
     try:
-        raw = _run_applescript(script)
+        raw = _run_applescript_with_retry(script)
     except RuntimeError as e:
         logger.error(f"Failed to export MoneyMoney transactions: {e}")
         return []
@@ -97,10 +134,18 @@ def get_amazon_transactions(days_back: int = 60) -> list[MMTransaction]:
             comment=t.get("comment", ""),
             end_to_end_reference=t.get("endToEndReference", ""),
             account_uuid=t.get("accountUuid", ""),
+            category=t.get("category", "") or "",
+            category_id=t.get("categoryId"),
+            category_uuid=t.get("categoryUuid", "") or "",
         )
         result.append(tx)
 
     amazon = [t for t in result if _is_amazon(t)]
+    if ONLY_ENRICH_UNCATEGORIZED:
+        uncategorized = [t for t in amazon if _is_uncategorized(t)]
+        logger.info(f"Amazon uncategorized transactions: {len(uncategorized)}")
+        return uncategorized
+
     logger.info(f"Amazon transactions: {len(amazon)}")
     return amazon
 
@@ -108,6 +153,14 @@ def get_amazon_transactions(days_back: int = 60) -> list[MMTransaction]:
 def _is_amazon(tx: MMTransaction) -> bool:
     text = (tx.name + tx.purpose).upper()
     return any(p.upper() in text for p in AMAZON_TRANSACTION_PATTERNS)
+
+
+def _is_uncategorized(tx: MMTransaction) -> bool:
+    if tx.category_id not in (None, 0):
+        return False
+    if tx.category_uuid.strip():
+        return False
+    return tx.category.strip() == ""
 
 
 def is_already_enriched(tx: MMTransaction) -> bool:
@@ -130,7 +183,7 @@ def set_transaction_comment(tx: MMTransaction, comment_text: str, is_refund: boo
 
     script = f'tell application "MoneyMoney" to set transaction id {tx.id} comment to "{safe_comment}"'
     try:
-        _run_applescript(script)
+        _run_applescript_with_retry(script)
         logger.info(f"Set comment on transaction {tx.id}: {full_comment}")
         return True
     except RuntimeError as e:
