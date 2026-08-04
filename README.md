@@ -62,7 +62,7 @@ playwright install chromium
 # 2. First run — bootstrap login once (browser window opens)
 python -m enricher --interactive-login
 
-# 3. Install as background service (runs 4 times/day and at login)
+# 3. Install as background service (runs every hour and at login)
 #    Edit com.example.amazon-enricher.plist first — replace YOUR_USERNAME,
 #    project path and Python path (for example .venv/bin/python)
 cp com.example.amazon-enricher.plist ~/Library/LaunchAgents/
