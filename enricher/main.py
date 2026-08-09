@@ -39,12 +39,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def run(dry_run: bool = False, allow_interactive_login: bool = True) -> None:
+def run(dry_run: bool = False, allow_interactive_login: bool = True, include_categorized: bool = False) -> None:
     logger.info("=== Amazon Enricher gestartet ===")
     cache.init_db()
 
     # 1. Fetch Amazon transactions from MoneyMoney
-    amazon_transactions = get_amazon_transactions(days_back=60)
+    amazon_transactions = get_amazon_transactions(days_back=60, override_filter=include_categorized)
     logger.info(f"Gefundene Amazon-Transaktionen: {len(amazon_transactions)}")
 
     if not amazon_transactions:
@@ -126,6 +126,7 @@ def main() -> None:
     parser.add_argument("--reset-session", action="store_true", help="Amazon-Session zurücksetzen (erneuter Login)")
     parser.add_argument("--store-credentials", action="store_true", help="Amazon-Zugangsdaten sicher im macOS Keychain speichern")
     parser.add_argument("--clear-credentials", action="store_true", help="Gespeicherte Amazon-Zugangsdaten aus dem Keychain löschen")
+    parser.add_argument("--include-categorized", action="store_true", help="Auch kategorisierte Amazon-Transaktionen anreichern (ignoriert ONLY_ENRICH_UNCATEGORIZED)")
     args = parser.parse_args()
 
     if args.reset_session:
@@ -154,7 +155,7 @@ def main() -> None:
     if args.interactive_login:
         allow_interactive_login = True
 
-    run(dry_run=args.dry_run, allow_interactive_login=allow_interactive_login)
+    run(dry_run=args.dry_run, allow_interactive_login=allow_interactive_login, include_categorized=args.include_categorized)
 
 
 if __name__ == "__main__":

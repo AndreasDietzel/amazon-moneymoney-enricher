@@ -104,7 +104,7 @@ def _run_applescript_with_retry(script: str) -> str:
     raise RuntimeError("AppleScript retry logic reached an impossible state")
 
 
-def get_amazon_transactions(days_back: int = 60) -> list[MMTransaction]:
+def get_amazon_transactions(days_back: int = 60, override_filter: bool = False) -> list[MMTransaction]:
     """
     Export recent transactions from MoneyMoney as plist and filter for Amazon.
     Uses the documented 'export transactions' AppleScript command.
@@ -141,12 +141,20 @@ def get_amazon_transactions(days_back: int = 60) -> list[MMTransaction]:
         result.append(tx)
 
     amazon = [t for t in result if _is_amazon(t)]
-    if ONLY_ENRICH_UNCATEGORIZED:
+    if ONLY_ENRICH_UNCATEGORIZED and not override_filter:
         uncategorized = [t for t in amazon if _is_uncategorized(t)]
-        logger.info(f"Amazon uncategorized transactions: {len(uncategorized)}")
+        skipped = len(amazon) - len(uncategorized)
+        if skipped > 0:
+            logger.warning(
+                "⚠️  %d Amazon-Buchung(en) übersprungen, weil bereits kategorisiert. "
+                "Nutze --include-categorized um sie trotzdem anzureichern, "
+                "oder setze ONLY_ENRICH_UNCATEGORIZED=False in config.py.",
+                skipped,
+            )
+        logger.info("Amazon-Transaktionen: %d gesamt, %d unkategorisiert", len(amazon), len(uncategorized))
         return uncategorized
 
-    logger.info(f"Amazon transactions: {len(amazon)}")
+    logger.info("Amazon-Transaktionen: %d (Filter deaktiviert)", len(amazon))
     return amazon
 
 
@@ -157,8 +165,6 @@ def _is_amazon(tx: MMTransaction) -> bool:
 
 def _is_uncategorized(tx: MMTransaction) -> bool:
     if tx.category_id not in (None, 0):
-        return False
-    if tx.category_uuid.strip():
         return False
     return tx.category.strip() == ""
 
