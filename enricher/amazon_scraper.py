@@ -201,6 +201,22 @@ def find_matching_order(
         logger.info(f"Date+amount match → order {matched.order_id}: {matched.items}")
         return matched
 
+    # --- Strategy 4: grouped charge (Amazon batches multiple orders into one payment) ---
+    window_orders = [o for o in orders if window_start <= o.order_date <= window_end]
+    for i, o1 in enumerate(window_orders):
+        for o2 in window_orders[i + 1:]:
+            if abs(o1.amount + o2.amount - amount) < 0.02:
+                logger.info(
+                    "Grouped charge match → %s (%.2f€) + %s (%.2f€) = %.2f€",
+                    o1.order_id, o1.amount, o2.order_id, o2.amount, o1.amount + o2.amount,
+                )
+                return AmazonOrder(
+                    order_id=f"{o1.order_id}+{o2.order_id}",
+                    order_date=max(o1.order_date, o2.order_date),
+                    amount=o1.amount + o2.amount,
+                    items=o1.items + o2.items,
+                )
+
     logger.warning(f"No Amazon order found for {amount}€ around {booking_date} (order_id={amazon_order_id!r})")
     return None
 
