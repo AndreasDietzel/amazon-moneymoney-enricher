@@ -99,7 +99,8 @@ def run(dry_run: bool = False, allow_interactive_login: bool = True, include_cat
                     failed_count += 1
                     continue
 
-                description = format_description(order)
+                tx_amount = abs(tx.amount) if not is_refund else None
+                description = format_description(order, tx_amount=tx_amount)
                 logger.info(f"  ✓ {'[Erstattung] ' if is_refund else ''}{description}")
 
                 if dry_run:

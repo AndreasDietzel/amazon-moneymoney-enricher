@@ -159,8 +159,11 @@ def find_matching_order(
     if amazon_order_id:
         cached = cache.get_order_by_id(amazon_order_id)
         if cached:
-            logger.debug(f"Cache hit by order ID {amazon_order_id}")
-            return AmazonOrder(**_row_to_kwargs(cached))
+            order = AmazonOrder(**_row_to_kwargs(cached))
+            if order.items != ["Artikel unbekannt"]:
+                logger.debug(f"Cache hit by order ID {amazon_order_id}")
+                return order
+            logger.debug(f"Cache hit but bad data for {amazon_order_id}, re-fetching")
         order = _fetch_order_by_id(context, amazon_order_id)
         if order:
             cache.save_order(order.order_id, order.order_date, order.amount, order.items, end_to_end_ref)
@@ -293,6 +296,8 @@ def _fetch_order_by_id(context: BrowserContext, order_id: str) -> Optional[Amazo
     """
     Fetch a single order's detail page and parse items from it.
     URL: https://www.amazon.de/gp/your-account/order-details?orderID=XXX-XXXXXXX-XXXXXXX
+
+    Returns None if no product titles can be determined (triggers fallback to order list).
     """
     from .amazon_session import fetch_page
     from .config import AMAZON_BASE_URL
@@ -309,7 +314,7 @@ def _fetch_order_by_id(context: BrowserContext, order_id: str) -> Optional[Amazo
             order_date = d
             break
 
-    # Parse total amount — last "Gesamtbetrag" or grand total row
+    # Parse total amount — look for "Gesamtbetrag" / "Grand Total" row
     amount = None
     for row in soup.select(".a-row"):
         text = row.get_text(" ", strip=True)
@@ -318,7 +323,6 @@ def _fetch_order_by_id(context: BrowserContext, order_id: str) -> Optional[Amazo
             if a is not None:
                 amount = a
                 break
-    # Fallback: any price on the page
     if amount is None:
         for span in soup.select("span.a-color-price, .grand-total-price"):
             a = _parse_amount(span.get_text())
@@ -326,34 +330,73 @@ def _fetch_order_by_id(context: BrowserContext, order_id: str) -> Optional[Amazo
                 amount = a
                 break
 
-    # Parse product titles
-    items = []
+    # Parse product titles with a helper that filters non-product links
+    items: list[str] = []
     seen: set[str] = set()
-    for a_tag in soup.select("a[href*='/dp/']"):
-        title = a_tag.get_text(strip=True)
-        if title and len(title) > 5 and title not in seen:
-            items.append(title)
-            seen.add(title)
+
+    _PRICE_RE = re.compile(r"\d+[,\.]\d{2}\s*€")
+    _SKIP_FRAGMENTS = ("Amazon Visa", "Business Amex", "Bezahlmethode", "Lieferadresse", "Prime")
+
+    def _add(title: str) -> bool:
+        t = title.strip()
+        if (len(t) > 10
+                and t not in seen
+                and not _PRICE_RE.search(t)
+                and not any(f in t for f in _SKIP_FRAGMENTS)):
+            items.append(t)
+            seen.add(t)
+            return True
+        return False
+
+    # Strategy A: items inside .shipment sections (physical orders)
+    for shipment in soup.select(".shipment, [class*='shipment']"):
+        for a_tag in shipment.select("a[href*='/dp/']"):
+            _add(a_tag.get_text(strip=True))
+
+    # Strategy B: right-column layout (.a-col-right) or yohtmlc item containers
+    if not items:
+        for col in soup.select(".a-col-right, .yohtmlc-item, .a-fixed-left-grid-col"):
+            for a_tag in col.select("a[href*='/dp/']"):
+                _add(a_tag.get_text(strip=True))
+
+    # Strategy C: all /dp/ links with strict content filter (avoids recommendation carousels)
+    if not items:
+        for a_tag in soup.select("a[href*='/dp/']"):
+            _add(a_tag.get_text(strip=True))
+
+    # Strategy D: img alt texts as last resort
     if not items:
         for img in soup.select("img[alt]"):
             alt = img.get("alt", "").strip()
-            if alt and len(alt) > 5 and alt not in seen:
-                items.append(alt)
-                seen.add(alt)
+            if len(alt) > 10:
+                _add(alt)
+
     if not items:
-        items = ["Artikel unbekannt"]
+        # Save HTML for offline debugging, do NOT cache this failure
+        _save_debug_html(order_id, html)
+        logger.warning(f"No product titles found for order {order_id} – falling back to order list")
+        return None
 
-    if not order_date or amount is None:
-        logger.warning(f"Could not parse date/amount from order detail page for {order_id}")
-        # Still return with what we have if we have items
-        if not order_date:
-            from datetime import date as _date
-            order_date = _date.today()
-        if amount is None:
-            amount = 0.0
+    if not order_date:
+        from datetime import date as _date
+        order_date = _date.today()
+    if amount is None:
+        amount = 0.0
 
-    logger.info(f"Fetched order detail {order_id}: {items}")
+    logger.info(f"Fetched order detail {order_id}: {items[:3]}")
     return AmazonOrder(order_id=order_id, order_date=order_date, amount=amount, items=items)
+
+
+def _save_debug_html(order_id: str, html: str) -> None:
+    """Persist failing order HTML for offline inspection."""
+    import tempfile
+    from pathlib import Path
+    debug_file = Path(tempfile.gettempdir()) / f"amazon_order_{order_id}.html"
+    try:
+        debug_file.write_text(html, encoding="utf-8")
+        logger.info(f"Debug HTML saved → {debug_file}")
+    except Exception:
+        pass
 
 
 def _fetch_page(context: BrowserContext, url: str) -> str:
@@ -361,14 +404,23 @@ def _fetch_page(context: BrowserContext, url: str) -> str:
     return fetch_page(context, url)
 
 
-def format_description(order: AmazonOrder, max_items: int = MAX_ITEMS_IN_DESCRIPTION) -> str:
+def format_description(order: AmazonOrder, max_items: int = MAX_ITEMS_IN_DESCRIPTION, tx_amount: Optional[float] = None) -> str:
     """
     Format order items for the MoneyMoney comment field.
     Example: "USB-C Kabel, Druckerpapier A4 (2x) [+1 weiterer]"
+    When the transaction covers only part of the order total (split shipment),
+    append "(15,99€ v. 32,72€)" so each charge is distinguishable.
     """
-    items = order.items[:max_items]
+    _MAX_TITLE_LEN = 60
+
+    def _shorten(title: str) -> str:
+        return title[:_MAX_TITLE_LEN].rstrip() + "…" if len(title) > _MAX_TITLE_LEN else title
+
+    items = [_shorten(t) for t in order.items[:max_items]]
     result = ", ".join(items)
     remaining = len(order.items) - max_items
     if remaining > 0:
         result += f" [+{remaining} {'weiterer' if remaining == 1 else 'weitere'}]"
+    if tx_amount is not None and order.amount > 0 and abs(order.amount - tx_amount) > 0.50:
+        result += f" ({tx_amount:.2f}€ v. {order.amount:.2f}€)"
     return result

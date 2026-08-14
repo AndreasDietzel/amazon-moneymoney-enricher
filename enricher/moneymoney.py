@@ -170,7 +170,10 @@ def _is_uncategorized(tx: MMTransaction) -> bool:
 
 
 def is_already_enriched(tx: MMTransaction) -> bool:
-    return tx.comment.startswith(ENRICHER_COMMENT_PREFIX) or tx.comment.startswith(ENRICHER_REFUND_PREFIX)
+    if tx.comment.startswith(ENRICHER_COMMENT_PREFIX):
+        # "Artikel unbekannt" = fehlgeschlagene Anreicherung, erneut versuchen
+        return tx.comment != f"{ENRICHER_COMMENT_PREFIX}Artikel unbekannt"
+    return tx.comment.startswith(ENRICHER_REFUND_PREFIX)
 
 
 def set_transaction_comment(tx: MMTransaction, comment_text: str, is_refund: bool = False) -> bool:

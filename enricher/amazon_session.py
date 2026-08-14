@@ -9,8 +9,11 @@ import json
 import logging
 import keyring
 import os
-import time
 from playwright.sync_api import BrowserContext, Page
+try:
+    from playwright_stealth import stealth_sync as _stealth
+except ImportError:
+    _stealth = None  # optional – graceful fallback
 
 from .config import (
     AMAZON_BASE_URL,
@@ -140,6 +143,8 @@ def _is_session_valid(page: Page) -> bool:
     Gibt False zurück wenn auf die Login-Seite weitergeleitet wird.
     """
     try:
+        if _stealth:
+            _stealth(page)
         page.goto(_ORDERS_URL, wait_until="domcontentloaded")
         # Amazon redirects to sign-in via server-side or JS — wait to settle
         page.wait_for_load_state("networkidle", timeout=10_000)
@@ -162,25 +167,43 @@ def _is_session_valid(page: Page) -> bool:
 def get_authenticated_context(playwright, allow_interactive_login: bool = True) -> BrowserContext:
     """
     Gibt einen Playwright BrowserContext mit gültiger Amazon-Session zurück.
-    Nutzt WebKit (Safari-Engine). Öffnet bei Bedarf ein Fenster zum Einloggen.
+    Interaktiver Login: Chromium (erscheint im macOS Dock, bessere Sichtbarkeit).
+    Headless-Runs: WebKit (Safari-Engine, weniger Bot-Erkennung).
     """
-    browser = playwright.webkit.launch(headless=not allow_interactive_login)
+    if allow_interactive_login:
+        # Chromium für interaktiven Login — erscheint im Dock und kann fokussiert werden.
+        # Bevorzuge system-installierten Chrome (bessere macOS-Integration), Fallback auf Playwright-Chromium.
+        try:
+            browser = playwright.chromium.launch(headless=False, channel="chrome")
+        except Exception:
+            browser = playwright.chromium.launch(headless=False)
+    else:
+        browser = playwright.webkit.launch(headless=True)
 
+    # Try storage state first (most complete — includes localStorage/sessionStorage)
     state = _load_storage_state()
     if state:
         context = browser.new_context(storage_state=state)
-    else:
-        context = browser.new_context()
-
-    cookies = None if state else _load_cookies()
-    if cookies:
-        context.add_cookies(cookies)
         page = context.new_page()
         if _is_session_valid(page):
             logger.info("Gespeicherte Amazon-Session wiederhergestellt")
             page.close()
             return context
-        else:
+        logger.info("Storage-State abgelaufen, erneuter Login erforderlich")
+        _clear_cookies()
+        page.close()
+        context.close()
+        context = browser.new_context()
+    else:
+        context = browser.new_context()
+        cookies = _load_cookies()
+        if cookies:
+            context.add_cookies(cookies)
+            page = context.new_page()
+            if _is_session_valid(page):
+                logger.info("Gespeicherte Amazon-Session wiederhergestellt")
+                page.close()
+                return context
             logger.info("Session abgelaufen, erneuter Login erforderlich")
             _clear_cookies()
             page.close()
@@ -194,33 +217,89 @@ def get_authenticated_context(playwright, allow_interactive_login: bool = True) 
 
     # Kein gültiger Login — Browser öffnen
     page = context.new_page()
+    if _stealth:
+        _stealth(page)  # Bot-Detection maskieren bevor erste Navigation
     page.goto(f"{AMAZON_BASE_URL}/gp/sign-in.html", wait_until="domcontentloaded")
+    page.bring_to_front()  # Browser-Fenster in den Vordergrund
+
+    # macOS-Notification damit der User weiß, dass ein Browser-Fenster wartet
+    import subprocess
+    # Gesprochene Ansage (immer hörbar, unabhängig von Fensterfokus)
+    subprocess.Popen(["say", "-v", "Anna", "Bitte im Browser bei Amazon einloggen"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Notification-Banner
+    subprocess.run(
+        ["osascript", "-e",
+         'display notification "Bitte im Browser bei Amazon einloggen" '
+         'with title "Amazon Enricher" sound name "Glass"'],
+        check=False, capture_output=True,
+    )
+    # Browser-Fenster in den Vordergrund (versuche Google Chrome und Chromium)
+    for _app in ("Google Chrome", "Chromium"):
+        r = subprocess.run(["osascript", "-e", f'tell application "{_app}" to activate'],
+                           check=False, capture_output=True)
+        if r.returncode == 0:
+            break
 
     auto_login_attempted = _try_auto_login(page)
 
     print("\n" + "="*60)
-    print("Amazon-Login erforderlich.")
+    print("⚠️  AMAZON-LOGIN ERFORDERLICH")
+    print()
     if auto_login_attempted:
-        print("Auto-Login wurde mit gespeicherten Keychain-Zugangsdaten versucht.")
-        print("Bitte ggf. nur noch MFA/Captcha bestätigen.")
+        print("Auto-Login mit gespeicherten Zugangsdaten versucht.")
+        print("→ Bitte NUR noch MFA/Captcha im Browser bestätigen.")
     else:
-        print("Bitte melde dich im geöffneten Browserfenster an.")
+        print("→ WECHSLE JETZT ZUM GERADE GEÖFFNETEN CHROME-FENSTER!")
+        print("  (du hörst einen Ton + siehst eine Benachrichtigung)")
+        print("  E-Mail, Passwort und ggf. MFA-Code eingeben.")
+        print()
+        print("  Tipp: --store-credentials einmalig ausführen für")
+        print("         automatischen Login beim nächsten Mal.")
+    print()
     print("Das Fenster schließt sich automatisch nach erfolgreichem Login.")
+    print("(Timeout: 10 Minuten)")
     print("="*60 + "\n")
 
-    # Wait until order history is really accessible.
-    timeout_seconds = 300
-    poll_seconds = 3
-    deadline = time.time() + timeout_seconds
+    # Poll every 3 s until the browser leaves all Amazon sign-in/auth pages.
+    # Using a polling loop (instead of wait_for_url) to log the current URL for debugging.
+    import time
+    # ax/ = OpenID intermediate pages (ax/claim, ax/authportal, etc.) – warte bis diese abgeschlossen sind
+    _AUTH_PATHS = ("ap/signin", "ap/mfa", "ap/cvf", "ap/register", "ap/captcha", "ap/challenge", "/ax/")
+    deadline = time.time() + 600  # 10 Minuten
+    last_logged_url = ""
+    logged_in = False
+
     while time.time() < deadline:
-        if _is_session_valid(page):
-            break
-        time.sleep(poll_seconds)
-    else:
+        try:
+            current_url = page.url
+        except Exception:
+            current_url = ""
+
+        if current_url and current_url != last_logged_url:
+            logger.info(f"Browser-URL: {current_url}")
+            last_logged_url = current_url
+
+        if current_url and not any(p in current_url for p in _AUTH_PATHS):
+            # Muss eine echte Amazon-Seite sein (home page oder orders), nicht eine Zwischenseite
+            if ("amazon.de/" in current_url and
+                    not current_url.rstrip("/").endswith("amazon.de")):
+                # Landed on a real subpage (e.g. /gp/..., /?...) → vollständig eingeloggt
+                logged_in = True
+                break
+            elif current_url in (f"https://www.amazon.de/", f"https://www.amazon.de"):
+                logged_in = True
+                break
+
+        page.wait_for_timeout(3_000)
+
+    if not logged_in:
         context.close()
         raise SessionLoginRequiredError(
             "Amazon-Login nicht abgeschlossen (Timeout). Bitte Login inklusive MFA/Captcha vollständig beenden."
         )
+
+    logger.info("Login im Browser erfolgreich abgeschlossen")
 
     # Give Amazon time to set all session cookies
     try:
@@ -243,6 +322,8 @@ def fetch_page(context: BrowserContext, url: str) -> str:
     Wartet auf networkidle damit JavaScript-gerenderte Inhalte vollständig geladen sind.
     """
     page = context.new_page()
+    if _stealth:
+        _stealth(page)
     try:
         page.goto(url, wait_until="domcontentloaded")
         page.wait_for_load_state("networkidle", timeout=15_000)
