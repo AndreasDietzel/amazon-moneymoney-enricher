@@ -234,12 +234,17 @@ def get_authenticated_context(playwright, allow_interactive_login: bool = True) 
          'with title "Amazon Enricher" sound name "Glass"'],
         check=False, capture_output=True,
     )
-    # Browser-Fenster in den Vordergrund (versuche Google Chrome und Chromium)
-    for _app in ("Google Chrome", "Chromium"):
-        r = subprocess.run(["osascript", "-e", f'tell application "{_app}" to activate'],
-                           check=False, capture_output=True)
-        if r.returncode == 0:
-            break
+    # Browser-Fenster in den Vordergrund — System Events findet den Playwright-Chromium-Prozess
+    subprocess.run(
+        ["osascript", "-e",
+         'tell application "System Events"\n'
+         '  set procs to (every process whose name contains "Chrom")\n'
+         '  if length of procs > 0 then\n'
+         '    set frontmost of item 1 of procs to true\n'
+         '  end if\n'
+         'end tell'],
+        check=False, capture_output=True,
+    )
 
     auto_login_attempted = _try_auto_login(page)
 
