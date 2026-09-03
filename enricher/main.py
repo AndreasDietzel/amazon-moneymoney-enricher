@@ -22,6 +22,8 @@ from .amazon_session import (
     _clear_cookies,
     save_credentials,
     clear_credentials,
+    save_totp_secret,
+    clear_totp_secret,
 )
 from .config import LOG_FILE, APP_DIR
 from .moneymoney import get_amazon_transactions, is_already_enriched, set_transaction_comment
@@ -127,6 +129,8 @@ def main() -> None:
     parser.add_argument("--reset-session", action="store_true", help="Amazon-Session zurücksetzen (erneuter Login)")
     parser.add_argument("--store-credentials", action="store_true", help="Amazon-Zugangsdaten sicher im macOS Keychain speichern")
     parser.add_argument("--clear-credentials", action="store_true", help="Gespeicherte Amazon-Zugangsdaten aus dem Keychain löschen")
+    parser.add_argument("--store-totp-secret", action="store_true", help="Amazon-Authenticator-Secret (Base32) im Keychain speichern, für automatisches MFA-Ausfüllen bei Login")
+    parser.add_argument("--clear-totp-secret", action="store_true", help="Gespeichertes TOTP-Secret aus dem Keychain löschen")
     parser.add_argument("--include-categorized", action="store_true", help="Auch kategorisierte Amazon-Transaktionen anreichern (ignoriert ONLY_ENRICH_UNCATEGORIZED)")
     args = parser.parse_args()
 
@@ -148,6 +152,20 @@ def main() -> None:
     if args.clear_credentials:
         clear_credentials()
         print("Gespeicherte Zugangsdaten aus dem Keychain gelöscht.")
+        return
+
+    if args.store_totp_secret:
+        secret = getpass.getpass("Amazon Authenticator-Secret / Base32-Key (wird nicht angezeigt): ").strip()
+        if not secret:
+            print("Abgebrochen: Secret fehlt.")
+            return
+        save_totp_secret(secret)
+        print("TOTP-Secret im macOS Keychain gespeichert. MFA-Codes werden ab jetzt automatisch generiert.")
+        return
+
+    if args.clear_totp_secret:
+        clear_totp_secret()
+        print("Gespeichertes TOTP-Secret aus dem Keychain gelöscht.")
         return
 
     allow_interactive_login = True

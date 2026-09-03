@@ -13,6 +13,7 @@ KEYCHAIN_COOKIE_KEY = "amazon_session_cookies"
 KEYCHAIN_STATE_KEY = "amazon_storage_state"
 KEYCHAIN_USERNAME_KEY = "amazon_username"
 KEYCHAIN_PASSWORD_KEY = "amazon_password"
+KEYCHAIN_TOTP_KEY = "amazon_totp_secret"
 
 # Amazon marketplace to use
 AMAZON_BASE_URL = "https://www.amazon.de"

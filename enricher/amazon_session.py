@@ -14,6 +14,10 @@ try:
     from playwright_stealth import stealth_sync as _stealth
 except ImportError:
     _stealth = None  # optional – graceful fallback
+try:
+    import pyotp
+except ImportError:
+    pyotp = None  # optional – TOTP-Autofill nur wenn installiert
 
 from .config import (
     AMAZON_BASE_URL,
@@ -22,6 +26,7 @@ from .config import (
     KEYCHAIN_STATE_KEY,
     KEYCHAIN_USERNAME_KEY,
     KEYCHAIN_PASSWORD_KEY,
+    KEYCHAIN_TOTP_KEY,
 )
 
 logger = logging.getLogger(__name__)
@@ -105,10 +110,55 @@ def clear_credentials() -> None:
             pass
 
 
+def _load_totp_secret() -> str | None:
+    return keyring.get_password(KEYCHAIN_SERVICE, KEYCHAIN_TOTP_KEY)
+
+
+def save_totp_secret(secret: str) -> None:
+    # Normalize like an authenticator app would (spaces are a common copy/paste artifact)
+    keyring.set_password(KEYCHAIN_SERVICE, KEYCHAIN_TOTP_KEY, secret.replace(" ", "").upper())
+
+
+def clear_totp_secret() -> None:
+    try:
+        keyring.delete_password(KEYCHAIN_SERVICE, KEYCHAIN_TOTP_KEY)
+    except keyring.errors.PasswordDeleteError:
+        pass
+
+
+def _try_auto_totp(page: Page) -> bool:
+    """
+    Fills Amazon's authenticator-app OTP challenge from the stored TOTP secret.
+    Returns True if an OTP field was found and a code was submitted.
+    """
+    otp_field = page.locator("#auth-mfa-otpcode, input[name='otpCode']")
+    if otp_field.count() == 0:
+        return False
+
+    secret = _load_totp_secret()
+    if not secret or not pyotp:
+        logger.warning("MFA-Code angefordert, aber kein TOTP-Secret gespeichert (--store-totp-secret)")
+        return False
+
+    code = pyotp.TOTP(secret).now()
+    otp_field.first.fill(code)
+
+    # Reduces future MFA prompts for this browser fingerprint/session
+    remember = page.locator("#auth-mfa-remember-device")
+    if remember.count() > 0 and not remember.first.is_checked():
+        remember.first.check()
+
+    submit = page.locator("#auth-signin-button, input[type='submit']")
+    if submit.count() > 0:
+        submit.first.click()
+        page.wait_for_load_state("networkidle", timeout=12_000)
+    return True
+
+
 def _try_auto_login(page: Page) -> bool:
     """
-    Attempt interactive page login with stored credentials.
-    MFA/captcha may still require manual confirmation.
+    Attempt full page login with stored credentials, including the TOTP MFA
+    step when Amazon challenges for it. Captcha still requires manual entry.
     """
     username, password = _load_credentials()
     if not username or not password:
@@ -116,11 +166,14 @@ def _try_auto_login(page: Page) -> bool:
         return False
 
     try:
-        # Email step
-        if page.locator("#ap_email").count() > 0:
-            page.fill("#ap_email", username)
-            if page.locator("#continue").count() > 0:
-                page.click("#continue")
+        # Email step (Amazon renamed #ap_email -> #ap_email_login and dropped
+        # the separate #continue button in favor of the form's plain submit)
+        email_field = page.locator("#ap_email, #ap_email_login")
+        if email_field.count() > 0:
+            email_field.first.fill(username)
+            continue_btn = page.locator("#continue, input[type='submit']")
+            if continue_btn.count() > 0:
+                continue_btn.first.click()
                 page.wait_for_load_state("domcontentloaded")
 
         # Password step
@@ -128,8 +181,11 @@ def _try_auto_login(page: Page) -> bool:
             page.fill("#ap_password", password)
             if page.locator("#signInSubmit").count() > 0:
                 page.click("#signInSubmit")
+                page.wait_for_load_state("networkidle", timeout=12_000)
 
-        # Give Amazon a moment for redirects/challenges
+        # MFA step (authenticator-app OTP) — auto-filled from stored secret
+        _try_auto_totp(page)
+
         page.wait_for_load_state("networkidle", timeout=12_000)
         return True
     except Exception as e:
@@ -162,6 +218,48 @@ def _is_session_valid(page: Page) -> bool:
     except Exception as e:
         logger.debug(f"Session check failed: {e}")
         return False
+
+
+def _attempt_headless_login(browser) -> BrowserContext | None:
+    """
+    Fully unattended login for scheduled/non-interactive runs: fills stored
+    email + password, answers the TOTP-MFA challenge from the stored secret,
+    and saves the resulting session. Returns None (does not raise) on any
+    failure — e.g. missing credentials, captcha, or a challenge type that
+    can't be automated — so the caller can fall back to interactive login.
+    """
+    context = browser.new_context()
+    page = context.new_page()
+    if _stealth:
+        _stealth(page)
+    try:
+        page.goto(f"{AMAZON_BASE_URL}/gp/sign-in.html", wait_until="domcontentloaded")
+        if not _try_auto_login(page):
+            logger.info("Headless Auto-Login übersprungen (keine Zugangsdaten gespeichert)")
+            page.close()
+            context.close()
+            return None
+
+        if _is_session_valid(page):
+            logger.info("Headless Auto-Login erfolgreich (Zugangsdaten + TOTP)")
+            page.close()
+            all_cookies = context.cookies()
+            _save_cookies(all_cookies)
+            _save_storage_state(context.storage_state())
+            return context
+
+        logger.warning("Headless Auto-Login fehlgeschlagen (Captcha/neues Gerät?) — aktuelle URL: " + page.url)
+        page.close()
+        context.close()
+        return None
+    except Exception as e:
+        logger.warning(f"Headless Auto-Login fehlgeschlagen: {e}")
+        try:
+            page.close()
+        except Exception:
+            pass
+        context.close()
+        return None
 
 
 def get_authenticated_context(playwright, allow_interactive_login: bool = True) -> BrowserContext:
@@ -211,8 +309,13 @@ def get_authenticated_context(playwright, allow_interactive_login: bool = True) 
 
     if not allow_interactive_login:
         context.close()
+        headless_context = _attempt_headless_login(browser)
+        if headless_context:
+            return headless_context
+        browser.close()
         raise SessionLoginRequiredError(
-            "Keine gültige Amazon-Session verfügbar. Bitte einmal interaktiv mit --interactive-login anmelden."
+            "Automatischer Login (Zugangsdaten + TOTP) fehlgeschlagen — vermutlich Captcha oder neues Gerät. "
+            "Bitte einmal interaktiv mit --interactive-login anmelden."
         )
 
     # Kein gültiger Login — Browser öffnen
