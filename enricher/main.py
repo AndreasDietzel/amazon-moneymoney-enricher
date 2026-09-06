@@ -24,6 +24,8 @@ from .amazon_session import (
     clear_credentials,
     save_totp_secret,
     clear_totp_secret,
+    import_safari_session,
+    SafariCookieImportError,
 )
 from .config import LOG_FILE, APP_DIR
 from .moneymoney import get_amazon_transactions, is_already_enriched, set_transaction_comment
@@ -125,6 +127,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Amazon MoneyMoney Enricher")
     parser.add_argument("--dry-run", action="store_true", help="Nur anzeigen, nicht schreiben")
     parser.add_argument("--interactive-login", action="store_true", help="Erlaubt interaktiven Browser-Login (für Erstanmeldung/Session-Erneuerung)")
+    parser.add_argument("--import-safari-session", action="store_true", help="Amazon-Session direkt aus dem eingeloggten Safari übernehmen (umgeht Amazons Bot-/MFA-Erkennung bei automatisiertem Login)")
     parser.add_argument("--non-interactive", action="store_true", help="Keine Login-Prompts, beendet sauber wenn Session fehlt (für launchd)")
     parser.add_argument("--reset-session", action="store_true", help="Amazon-Session zurücksetzen (erneuter Login)")
     parser.add_argument("--store-credentials", action="store_true", help="Amazon-Zugangsdaten sicher im macOS Keychain speichern")
@@ -137,6 +140,16 @@ def main() -> None:
     if args.reset_session:
         _clear_cookies()
         print("Session zurückgesetzt. Beim nächsten Start wird ein neuer Login benötigt.")
+        return
+
+    if args.import_safari_session:
+        with sync_playwright() as playwright:
+            try:
+                import_safari_session(playwright)
+            except SafariCookieImportError as error:
+                print(f"Fehlgeschlagen: {error}")
+                return
+        print("Amazon-Session aus Safari übernommen und im Keychain gespeichert.")
         return
 
     if args.store_credentials:

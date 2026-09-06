@@ -155,10 +155,14 @@ def _try_auto_totp(page: Page) -> bool:
     return True
 
 
-def _try_auto_login(page: Page) -> bool:
+def _try_auto_login(page: Page, auto_totp: bool = True) -> bool:
     """
     Attempt full page login with stored credentials, including the TOTP MFA
     step when Amazon challenges for it. Captcha still requires manual entry.
+
+    auto_totp=False skips the automatic OTP fill+submit (used for interactive
+    logins, where a race between the stored secret and the user's own device
+    would burn the challenge and force Amazon to reissue it as "invalid").
     """
     username, password = _load_credentials()
     if not username or not password:
@@ -184,7 +188,8 @@ def _try_auto_login(page: Page) -> bool:
                 page.wait_for_load_state("networkidle", timeout=12_000)
 
         # MFA step (authenticator-app OTP) — auto-filled from stored secret
-        _try_auto_totp(page)
+        if auto_totp:
+            _try_auto_totp(page)
 
         page.wait_for_load_state("networkidle", timeout=12_000)
         return True
@@ -349,7 +354,7 @@ def get_authenticated_context(playwright, allow_interactive_login: bool = True) 
         check=False, capture_output=True,
     )
 
-    auto_login_attempted = _try_auto_login(page)
+    auto_login_attempted = _try_auto_login(page, auto_totp=False)
 
     print("\n" + "="*60)
     print("⚠️  AMAZON-LOGIN ERFORDERLICH")
@@ -422,6 +427,81 @@ def get_authenticated_context(playwright, allow_interactive_login: bool = True) 
     page.close()
 
     return context
+
+
+class SafariCookieImportError(RuntimeError):
+    """Raised when no usable Amazon session could be read from Safari's cookie store."""
+
+
+def import_safari_session(playwright) -> None:
+    """
+    Reads the Amazon session cookies straight out of the user's own logged-in
+    Safari (via browser_cookie3), validates them in a headless context, and
+    saves them to the Keychain — the same place get_authenticated_context()
+    reads from. Sidesteps Amazon's bot/new-device MFA challenges entirely,
+    since it's reusing a session Amazon already trusts.
+
+    Requires Full Disk Access for the terminal/python running this, since
+    Safari's cookie store is TCC-protected.
+    """
+    import browser_cookie3
+
+    # Bare "amazon.de" (not "www.amazon.de") so browser_cookie3's substring
+    # match also picks up cookies scoped to ".amazon.de" (at-acbde, session-id, …).
+    domain = AMAZON_BASE_URL.split("//")[-1].removeprefix("www.")
+    try:
+        raw_cookies = list(browser_cookie3.safari(domain_name=domain))
+    except Exception as e:
+        raise SafariCookieImportError(
+            f"Safari-Cookies konnten nicht gelesen werden: {e}. "
+            "Terminal/Python braucht ggf. Full Disk Access "
+            "(Systemeinstellungen → Datenschutz & Sicherheit → Vollständiger Festplattenzugriff)."
+        ) from e
+
+    if not raw_cookies:
+        raise SafariCookieImportError(
+            f"Keine {domain}-Cookies in Safari gefunden. Bitte erst in Safari bei Amazon einloggen."
+        )
+
+    seen = set()
+    pw_cookies = []
+    for c in raw_cookies:
+        key = (c.name, c.domain, c.path)
+        if key in seen:
+            continue
+        seen.add(key)
+        entry = {
+            "name": c.name,
+            "value": c.value,
+            "domain": c.domain,
+            "path": c.path or "/",
+            "secure": bool(c.secure),
+            "httpOnly": c.name in ("at-acbde", "sess-at-acbde", "x-acbde", "session-token"),
+            "sameSite": "Lax",
+        }
+        if c.expires:
+            entry["expires"] = c.expires
+        pw_cookies.append(entry)
+
+    browser = playwright.webkit.launch(headless=True)
+    try:
+        context = browser.new_context()
+        context.add_cookies(pw_cookies)
+        page = context.new_page()
+        valid = _is_session_valid(page)
+        page.close()
+        if not valid:
+            context.close()
+            raise SafariCookieImportError(
+                "Aus Safari importierte Cookies ergeben keine gültige Amazon-Session. "
+                "Bitte in Safari neu bei Amazon einloggen und erneut versuchen."
+            )
+        all_cookies = context.cookies()
+        _save_cookies(all_cookies)
+        _save_storage_state(context.storage_state())
+        context.close()
+    finally:
+        browser.close()
 
 
 def fetch_page(context: BrowserContext, url: str) -> str:

@@ -79,6 +79,7 @@ python -m enricher --non-interactive  # No login prompts, safe for launchd/cron
 python -m enricher --reset-session  # Clear cookies, force re-login
 python -m enricher --store-credentials  # Store Amazon login in macOS Keychain
 python -m enricher --clear-credentials  # Remove saved login from Keychain
+python -m enricher --import-safari-session  # Reuse the session from a Safari tab already logged into Amazon
 ```
 
 ### Login once, then weekly runs stay automatic
@@ -92,6 +93,18 @@ python -m enricher --store-credentials
 On future runs, the enricher will try to auto-login with saved credentials and usually only ask for manual interaction when Amazon requires MFA/captcha.
 
 For background execution, use `--non-interactive` so the process never hangs waiting for login. If session renewal is needed, run `python -m enricher --interactive-login` once.
+
+### If Amazon keeps rejecting automated login (captcha/new-device loop)
+
+Amazon sometimes treats the automated browser as an untrusted device and throws it into a captcha/MFA loop that never resolves cleanly — retrying `--interactive-login` won't help since it's Amazon's bot-detection, not a wrong password or code. The reliable fix is to reuse the session your real, already-trusted Safari has:
+
+```bash
+# 1. Log into amazon.de normally in Safari (if not already)
+# 2. Import that session directly — no MFA/captcha involved
+python -m enricher --import-safari-session
+```
+
+This reads Amazon's session cookies straight out of Safari's cookie store (via `browser_cookie3`) and saves them the same way `--interactive-login` would. It requires Full Disk Access for the terminal/Python running it (System Settings → Privacy & Security → Full Disk Access), since Safari's cookie store is TCC-protected. Like any session, it will eventually expire — just re-run the command when that happens.
 
 ## Security
 
